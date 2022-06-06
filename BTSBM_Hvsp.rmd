@@ -45,7 +45,7 @@ output_ret <- function(ret, what, by = "K.seq") {
 }
 ```
 
-This file provides more details on the toy example, simulation and the citation study for 
+This file provides more details on the toy example, simulation and the citation network study for 
 "Hierarchical Vintage Sparse PCA (Hvsp): Discussion on Vintage Factor Analysis with Varimax Performs Statistical Inference by Rohe and Zeng".
 
 # Toy example
@@ -352,6 +352,7 @@ method_lab <- data.table(method = c("HCD.seq", "HCD2.seq", "HCD.varimax.seq",
 ## Vary K
 
 We simulate balanced BTSBM with $n = 3200$, $K = 2^d$, and the values of $d = 2,3,4,5,6$. The average out-in ratio (between-block edge/within-block edges) for all $K$ is fixed at 0.15 and the average node degree is set to 50. 
+Each configuration is repeated 100 times.
 
 ```{r}
 ret <- fread("output/vsp_2088688.csv")
@@ -481,6 +482,7 @@ ret_tmp %>%
 ## Vary degree
 
 Fixing the number of communities $K=16$, we vary the average degree of the network: $5, 10, ..., 60$.
+Each configuration is repeated 100 times.
 
 ```{r}
 ret1 <- fread("output/vsp_2091690.csv")
