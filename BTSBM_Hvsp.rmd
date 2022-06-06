@@ -1,0 +1,860 @@
+---
+title: "Hierarchical Vintage Sparse PCA (Hvsp)"
+output:
+  html_document:
+    code_folding: hide
+    highlight: haddock
+    number_sections: yes
+    theme: lumen
+    toc: yes
+    toc_depth: 4
+    toc_float: yes
+  pdf_document:
+    toc: yes
+    latex_engine: xelatex
+    extra_dependencies:
+      ctexcap: UTF8
+  html_notebook:
+    toc: yes
+editor_options:
+  chunk_output_type: console
+bibliography: references.bib
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = T, cache=T)
+pacman::p_load(ggplot2, data.table, stringr, dplyr, tidyr, xtable, scales, 
+               igraph, latex2exp, RColorBrewer, colorRamps, grid, dendsort, dendextend,
+               gridExtra, ggpubr, kableExtra, R.utils, vsp, irlba)
+if (!require("devtools")){
+    install.packages("devtools")
+}
+if (!require("Hvsp")) {
+  devtools::install_github("cccfran/Hvsp")
+} else {
+  library("Hvsp")
+}
+
+output_ret <- function(ret, what, by = "K.seq") {
+  colnames <- names(ret)
+  by_cols <- c("id", by)
+  sel_col <- c(by_cols,  colnames[grep(what, colnames)])
+  ret_long <- melt(ret[, ..sel_col], id.vars = by_cols, variable.name = "method")
+  ret_long[, method := str_replace(method, paste0(what, "."), "")]
+  ret_long
+}
+```
+
+This file provides more details on the toy example, simulation and the citation study for 
+"Hierarchical Vintage Sparse PCA (Hvsp): Discussion on Vintage Factor Analysis with Varimax Performs Statistical Inference by Rohe and Zeng".
+
+# Toy example
+
+In the toy example, we generate an 4-cluster Binary Tree Stochastic Block Models (BTSBM) \citep{li2020hierarchical}.
+The binary tree has 3 layers where Layer 1 includes all nodes, Layer 2 splits into 2 mega-communities, and Layer 3 further splits into 4 communities. Each color corresponds to each community labelled as $\{00, 01, 10,11\}$ in Layer 3. 
+In Layer 2, the mega-community $\{0\}$ includes $\{00,01\}$ (red and purple) and the mega-community $\{1\}$ includes $\{10,11\}$ (green and teal).
+%, both of which are colored accordingly.
+Edges between nodes within the same community/mega-community are assumed to be independently Bernoulli with probability $p_0, p_1, p_2$ depending on the layer.
+It is most natural to assume the communities are assortative $p_0 > p_1 > p_2$ so that 
+the communities are more closely connected as the hierarchical tree goes deeper; 
+or vice versa dis-assortative where  $p_0 < p_1 < p_2$.
+In the toy example, we generate a balanced 4-clustered BTSBM with 2048 nodes where each mega-community at Layer 2 has 1024 nodes and each community at Layer 3 has 512 nodes. We let $p_0 = 1$, $p_1 = 0.3$, and $p_2 = 0.09$ and scale accordingly so that the average degree of nodes is expected to be 50.
+
+We copy the definition of BTSBM (@li2020hierarchical) from here.
+
+**Definition 1** (The binary tree stochastic block model (BTSBM). Let $S_d := \{0, 1\}^d$ be the set of all length $d$ binary sequences and let $K = |S_d| = 2^d$. Each binary string in $S_d$ encodes a community label and has a 1-1 mapping to an integer in $[K]$ via standard binary representation $\mathcal{I}: S_d \rightarrow [K]$. For node $i \in [n]$, let $c(i) \in S_d$ be its community label, let $C_x = \{i : c(i) = x\}$ be the set of nodes labeled with string $x \in S_d$, and let $n_x = |C_x|$.
+
+1. Let $B \in \mathbb{R}^{K\times K}$ be a matrix of probabilities defined by 
+\[B_{\mathcal{I}(x),\mathcal{I}(x′)} = p_{D(x,x′)}\]
+where $p_0, p-1, \ldots, p_d$ are arbitrary $d + 1$ parameters in $[0, 1]$ and
+$D(x, x′) = (d + 1 − s(x, x′))I(x\neq x′$),
+for $s(x,x′) = \min\{q: x_q \neq x'_q\}$.
+
+2. Edges between all pairs of distinct nodes $i, j$ are independent Bernoulli, with
+\[P (A_{i,j} = 1) = B_{\mathcal{I}(c(i)),\mathcal{I}(c(j))}\]
+corresponding to the $n\times n$ probability matrix $P = \mathbb{E} A$.
+
+```{r}
+set.seed(1)
+n_samp <- 2048
+depth <- 2
+ncl <- 2^depth
+
+tt <- BTSBM(n = n_samp, d= depth, a.seq = c(1,.3,.3^2), lambda=50)
+A <- tt$A.list[[1]]
+```
+
+```{r}
+library(igraph)
+g <- graph.tree(7, 2)
+values <- list(c(1,1,1,1), c(1,1,0,0), c(0,0,1,1), 
+               c(1,0,0,0), c(0,1,0,0), c(0,0,1,0), c(0,0,0,1))
+V(g)$name <- c(expression(p[2]), rep(expression(p[1]), 2),
+               rep(expression(p[0]), 4))
+
+pdf("tables_figures/toy_tree.pdf", width = 10, height = 4)
+par(mar=c(2, 0, 0, 2))
+plot(g, layout = layout.reingold.tilford(g, root=1), 
+     vertex.shape="pie",
+     vertex.pie=values,
+     vertex.pie.color = list(scales::hue_pal()(4)[c(1,4,2,3)]),
+     vertex.size = 10*c(3,2,2,1,1,1,1),
+     vertex.frame.color = NA,
+     vertex.label.cex = 2,
+     vertex.label.color = "black",
+     edge.label = c(rep(c(0,1),3)),
+     edge.label.cex = 1.5,
+     edge.label.color = "black",
+     asp = 1)
+text(.4, 1, "Layer 1")
+text(1, 0, "Layer 2")
+text(1.4, -1, "Layer 3")
+text(-1, -1.2, "00")
+text(-0.35, -1.2, "01")
+text(0.35, -1.2, "10")
+text(1, -1.2, "11")
+dev.off()
+```
+
+
+We first run SVD and `vsp` with dimension $k=`r ncl`$ on the network and plot
+the scatter plot of pairs of principal components by SVD and pairs of   Varimax rotated components in Figure. The color corresponds to each community at Layer 3.
+
+```{r}
+vsp_toy <- vsp(A, rank = ncl, center = F)
+sel_col <- 1:ncl
+cols <- scales::hue_pal()(4)[c(1,4,2,3)]
+tt$label <- intToBin(tt$label-1)
+
+ss <- sqrt(nrow(vsp_toy$Y))
+p_tmp <- vsp_toy %>% get_varimax_y(sel_col) %>% dplyr::select(-id) %>% 
+  mutate_all(function(x) x/ss) %>%
+  ggplot(aes(x = y1, y = y2)) + geom_point(alpha = .5, aes(col = as.character(tt$label))) +
+  labs(color = "Community")  +
+  scale_color_manual(values = cols) +
+  theme_bw() + 
+  theme(legend.position = "bottom") + 
+  guides(colour = guide_legend(override.aes = list(size=5, alpha=1)))
+
+vsp_toy %>% get_svd_v(sel_col) %>% dplyr::select(-id) %>% 
+  GGally::ggpairs(legend = GGally::grab_legend(p_tmp),
+                  lower = list(continuous = GGally::wrap("points", alpha = 0.3, size = .5),
+                               mapping = aes(col = as.character(tt$label))) ) +
+  scale_color_manual(values = cols) +
+  ggplot2::theme_minimal() + 
+  theme(legend.position = "bottom")
+
+ggsave("tables_figures/vsp_hcd_full_svd.pdf", height = 6, width = 6)
+
+ss <- sqrt(nrow(vsp_toy$Y))
+vsp_toy %>% get_varimax_y(sel_col) %>% dplyr::select(-id) %>% 
+  mutate_all(function(x) x/ss) %>%
+  GGally::ggpairs(legend = GGally::grab_legend(p_tmp),
+                  lower = list(continuous = GGally::wrap("points", alpha = 0.3, size = .5),
+                               mapping = aes(col = as.character(tt$label))) ) +
+  scale_color_manual(values = cols) +
+  ggplot2::theme_minimal()  + 
+  theme(legend.position = "bottom")
+
+ggsave("tables_figures/vsp_hcd_full.pdf", height = 6, width = 6)
+```
+
+## Hvsp
+
+We next run `Hvsp` on the network layer by layer.
+In the first split, we apply `vsp` with dimension $k=2$.
+We plot the scatter plot of the Varimax rotated components of the first split.
+
+```{r}
+vsp_toy_2 <- vsp(A, rank = 2, center = F)
+sel_col <- 1:2
+
+ss <- sqrt(nrow(vsp_toy_2$Y))
+vsp_toy_2 %>% get_varimax_y(sel_col) %>% dplyr::select(-id) %>% 
+  mutate_all(function(x) x/ss) %>%
+  ggplot(aes(x = y1, y = y2)) + 
+  geom_point(alpha = .5, size = .5, aes(col = as.character(tt$label))) +
+  scale_color_manual(values = cols) +
+  ggplot2::theme_minimal() + 
+  xlab(TeX("$y_{1}$")) + ylab(TeX("$y_{2}$")) +
+  labs(color = "Community")  +
+  theme(legend.position = "bottom") + 
+  guides(colour = guide_legend(override.aes = list(size=5, alpha=1)))
+
+ggsave("tables_figures/vsp_hcd_2.pdf", height = 4, width = 4)
+```
+
+
+We next cluster the nodes as mega-community $\{0\}$ if $|\hat{Y}_{i,1}| \geq  |\hat{Y}_{i,2}|$ and as $\{1\}$ otherwise.
+Then we apply `vsp` again with dimension $k=2$ to the mega-community $\{0\}$ and $\{1\}$ respectively and obtain the second split.
+We show the scatter plot of the rotated component of $\{00, 01\}$.
+
+```{r}
+Communitying_1 <- apply(vsp_toy_2$Y, 1, function(x) which.max(abs(x)))
+cl1_idx_vsp <- Communitying_1==2
+A_1 <- A[cl1_idx_vsp, cl1_idx_vsp]
+vsp_toy_21 <- vsp(A_1, rank = 2, center = F)
+
+ss <- sqrt(nrow(vsp_toy_21$Y))
+vsp_hcd_21 <- vsp_toy_21 %>% get_varimax_y(sel_col) %>% dplyr::select(-id) %>% 
+  mutate_all(function(x) x/ss) %>%
+  ggplot(aes(x = y1, y = y2, col = as.character(tt$label[cl1_idx_vsp]))) + 
+  geom_point(alpha = .5, size = .5) +
+  scale_color_manual(values = cols[1:2]) +
+  ggplot2::theme_minimal() + 
+  xlab(TeX("$y_{11}$")) + ylab(TeX("$y_{12}$")) +
+  labs(color = "Community")  +
+  theme(legend.position = "bottom") + 
+  guides(colour = guide_legend(override.aes = list(size=5, alpha=1)))
+
+vsp_hcd_21
+
+ggsave("tables_figures/vsp_hcd_21.pdf", vsp_hcd_21, height = 4, width = 4)
+```
+
+```{r}
+cl2_idx_vsp <- Communitying_1==1
+A_2 <- A[cl2_idx_vsp, cl2_idx_vsp]
+vsp_toy_22 <- vsp(A_2, rank = 2, center = F)
+
+ss <- sqrt(nrow(vsp_toy_22$Y))
+vsp_hcd_22 <- vsp_toy_22 %>% get_varimax_y(sel_col) %>% dplyr::select(-id) %>% 
+  mutate_all(function(x) x/ss) %>%
+  ggplot(aes(x = y1, y = y2, col = as.character(tt$label[cl2_idx_vsp]))) + 
+  geom_point(alpha = .5, size = .5) +
+  scale_color_manual(values = cols[3:4]) +
+  ggplot2::theme_minimal() + 
+  xlab(TeX("$y_{21}$")) + ylab(TeX("$y_{22}$")) +
+  labs(color = "Community")  +
+  theme(legend.position = "bottom") + 
+  guides(colour = guide_legend(override.aes = list(size=5, alpha=1)))
+
+ggsave("tables_figures/vsp_hcd_22.pdf", vsp_hcd_22, height = 4, width = 4)
+```
+
+## HCD
+
+Similarly we apply HCD-Sign to the network layer by layer.
+
+```{r}
+svd_2 <- irlba(A, 2)
+as.data.frame(svd_2$v) %>%
+  ggplot(aes(x = V1, y = V2, col = as.character(tt$label))) + 
+  geom_point(alpha = .5, size = .5) +
+  ggplot2::theme_minimal() + 
+  scale_color_manual(values = cols) +
+  ggplot2::theme_minimal() + 
+  xlab(TeX("$y_{21}$")) + ylab(TeX("$y_{22}$")) +
+  labs(color = "Community")  +
+  theme(legend.position = "bottom") + 
+  guides(colour = guide_legend(override.aes = list(size=5, alpha=1)))
+
+ggsave("tables_figures/hcd_2.pdf", height = 4, width = 4)
+```
+
+```{r}
+Communitying <- rep(0,length(svd_2$v[,2]))
+Communitying[svd_2$v[,2]<=0] <- 1
+Communitying[svd_2$v[,2]>0] <- 2
+cl1_idx <- Communitying==1
+
+A_1 <- A[cl1_idx, cl1_idx]
+svd_21 <- irlba(A_1, 2)
+as.data.frame(svd_21$v) %>%
+  ggplot(aes(x = V1, y = V2, col = as.character(tt$label[cl1_idx]))) + 
+  geom_point(alpha = .5, size = .5) +
+  scale_color_manual(values = cols[1:2]) +
+  ggplot2::theme_minimal() + 
+  xlab(TeX("$y_{11}$")) + ylab(TeX("$y_{12}$")) +
+  labs(color = "Community")  +
+  theme(legend.position = "bottom") + 
+  guides(colour = guide_legend(override.aes = list(size=5, alpha=1)))
+
+ggsave("tables_figures/hcd_21.pdf", height = 4, width = 4)
+```
+
+## Plot together
+
+We plot HCD and `Hvsp` together in one plot so as to compare.
+
+```{r}
+svd_2_tbl <- as.data.table(svd_2$v)
+svd_2_tbl[, method := "SVD (HCD)"]
+svd_2_tbl[, layer := "Layer 1"]
+svd_2_tbl[, cl := tt$label]
+
+svd_21_tbl <- as.data.table(svd_21$v)
+svd_21_tbl[, method := "SVD (HCD)"]
+svd_21_tbl[, layer := "Layer 2"]
+svd_21_tbl[, cl := tt$label[cl1_idx]]
+
+
+sel_col <- 1:2
+ss <- sqrt(nrow(vsp_toy_2$Y))
+vsp_toy_2_tbl <- vsp_toy_2 %>% get_varimax_y(sel_col) %>% dplyr::select(-id) %>% 
+  mutate_all(function(x) x/ss) %>% as.data.table()
+vsp_toy_2_tbl[, method := "HVSP"]
+vsp_toy_2_tbl[, layer := "Layer 1"]
+vsp_toy_2_tbl[, cl := tt$label]
+
+ss <- sqrt(nrow(vsp_toy_21$Y))
+vsp_toy_21_tbl <- vsp_toy_21 %>% get_varimax_y(sel_col) %>% dplyr::select(-id) %>% 
+  mutate_all(function(x) x/ss) %>% as.data.table()
+vsp_toy_21_tbl[, ][, method := "HVSP"]
+vsp_toy_21_tbl[, layer := "Layer 2"]
+vsp_toy_21_tbl[, cl := tt$label[cl1_idx_vsp]]
+
+toy_tbl <- rbindlist(list(svd_2_tbl, svd_21_tbl, vsp_toy_2_tbl, vsp_toy_21_tbl),
+                     use.names = F)
+# toy_tbl[, layer := factor(layer, levels = c("Root", "First layer"))]
+toy_tbl[, method := factor(method, levels = c("SVD (HCD)", "HVSP"))]
+```
+
+```{r}
+toy_tbl %>% ggplot(aes(x = V1, y = V2)) + 
+  geom_point(alpha = .5, size = .5, aes(col = as.character(cl)) ) +
+  scale_color_manual(values = cols) +
+  ggplot2::theme_bw() + 
+  xlab(TeX("$y_{1}$")) + ylab(TeX("$y_{2}$")) + 
+  # facet_grid(layer ~ method, scales = "free") +
+  facet_grid(method ~ layer, scales = "free") +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  geom_vline(xintercept = 0, linetype = "dashed")+
+  labs(color = "Community")  +
+  theme(legend.position = "bottom",
+        legend.box.margin=margin(t=-10))  + 
+  guides(colour = guide_legend(override.aes = list(size=5, alpha=1)))
+
+ggsave("tables_figures/hcd_vs_vsp_toy.pdf", height = 4, width = 8)
+```
+
+# Simulation
+
+The simulation code is in `PaperCodeOnline/BTSBM_vsp.R` and is adapted from `PaperCodeOnline/BTSBM-Geometric-VaryingK.R`.
+We compare `Hvsp` with two `HCD` variants on the following metrics: 
+
+1. Normalized mutual information (NMI)
+2. Number of estimated clusters
+3. Accuracy of recovering the hierarchical structure, measured by the error in the tree distance matrix $\|S_{\hat{T}} - S_T\|^2_F / \| S_T\|^2_F$ 
+where $S_T= (s_T (c(i), c(j)))$ is $n\times n$  matrix where $s_T$ is the pairwise similarities induced by $T$
+4. Accuracy of estimating the probability matrix $P$, measured by 
+$\|\hat{P} - P\|^2_F / \| P\|^2_F$
+
+```{r echo = F}
+method_lab <- data.table(method = c("HCD.seq", "HCD2.seq", "HCD.varimax.seq",
+                                    "sp.seq", "sp.varimax.seq", 
+                                    "HCD", "HCD2"), 
+                         label = c("HCD-Sign", "HCD-Spec", "HVSP",
+                                   "RSC", "VSP",
+                                   "HCD-Sign", "HCD-Spec"))
+```
+
+## Vary K
+
+We simulate balanced BTSBM with $n = 3200$, $K = 2^d$, and the values of $d = 2,3,4,5,6$. The average out-in ratio (between-block edge/within-block edges) for all $K$ is fixed at 0.15 and the average node degree is set to 50. 
+
+```{r}
+ret <- fread("output/vsp_2088688.csv")
+```
+
+### In paper
+```{r}
+criteria <- "^nmi"
+ret_long <- output_ret(ret, criteria)
+
+ret_tmp <- merge(ret_long[grep("HCD\\.|sp\\.varimax", method), 
+                          .(mean(value)), by=.(K.seq, method)],
+                 method_lab[,.(method, label)], 
+                 by = "method")
+
+nmi_k <- ret_tmp %>% 
+  ggplot(aes(x = K.seq, y= V1, group = label, col = label, shape = label)) +
+  geom_line() + geom_point(size = 3) +
+  scale_x_continuous(breaks = unique(ret_long$K.seq)) +
+  scale_shape_manual(values = c(4,1,2)) +
+  ggtitle("NMI (Average degree = 50)") +
+  ylab("") +
+  xlab("Number of community (K)") +
+  theme_bw() +
+  theme(legend.position = "bottom", 
+        legend.title = element_blank(),
+        panel.grid.minor.x =  element_blank())
+```
+
+
+### NMI
+```{r}
+criteria <- "^nmi"
+ret_long <- output_ret(ret, criteria)
+
+ret_tmp <- merge(ret_long[grep("HCD|sp\\.varimax", method), 
+                          .(mean(value)), by=.(K.seq, method)],
+                 method_lab[,.(method, label)], 
+                 by = "method")
+
+ret_tmp %>% 
+  ggplot(aes(x = K.seq, y= V1, group = method, col = label, shape = label )) +
+  geom_line() + geom_point(size = 3) +
+  scale_x_continuous(breaks = unique(ret_long$K.seq)) +
+  ggtitle("NMI") +
+  ylab("") +
+  
+  theme_bw() +
+  theme(legend.position = "bottom", 
+        legend.title = element_blank(),
+        panel.grid.minor.x =  element_blank())
+```
+
+
+### ncl
+```{r}
+criteria <- "^ncl"
+ret_long <- output_ret(ret, criteria)
+
+ret_tmp <- merge(ret_long[grep("HCD|sp\\.varimax", method), 
+                          .(mean(value)), by=.(K.seq, method)],
+                 method_lab[,.(method, label)], 
+                 by = "method")
+
+ret_tmp %>% 
+  ggplot(aes(x = K.seq, y= V1, group = method, col = label, shape = label )) +
+  geom_line() + geom_point(size = 3) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  scale_x_continuous(breaks = unique(ret_long$K.seq)) +
+  ggtitle("Estimated number of communities") +
+  ylab("") +
+  
+  theme_bw() +
+  theme(legend.position = "bottom", 
+        legend.title = element_blank(),
+        panel.grid.minor.x =  element_blank())
+```
+
+
+### Similarity
+```{r}
+ret_long <- output_ret(ret, "bin.err")
+criteria <- "bin.err"
+ret_long <- output_ret(ret, criteria)
+
+ret_tmp <- merge(ret_long[grep("HCD|sp\\.varimax", method), 
+                          .(mean(value)), by=.(K.seq, method)],
+                 method_lab[,.(method, label)], 
+                 by = "method")
+
+ret_tmp %>% 
+  ggplot(aes(x = K.seq, y= V1, group = method, col = label, shape = label )) +
+  geom_line() + geom_point() +
+  scale_x_continuous(breaks = unique(ret_long$K.seq)) +
+  ggtitle("Error in the tree similarity matrix") +
+  ylab("") +
+  theme_bw() +
+  theme(legend.position = "bottom", 
+        legend.title = element_blank(),
+        panel.grid.minor.x =  element_blank())
+```
+
+### Matrix error
+```{r}
+criteria <- "P.err"
+ret_long <- output_ret(ret, criteria)
+
+ret_tmp <- merge(ret_long[grep("HCD|sp\\.varimax", method), 
+                          .(mean(value)), by=.(K.seq, method)],
+                 method_lab[,.(method, label)], 
+                 by = "method")
+
+ret_tmp %>% 
+  ggplot(aes(x = K.seq, y= V1, group = method, col = label, shape = label )) +
+  geom_line() + geom_point() +
+  scale_x_continuous(breaks = unique(ret_long$K.seq)) +
+  ggtitle("Error in the probability matrix") +
+  ylab("") +
+  
+  theme_bw() +
+  theme(legend.position = "bottom", 
+        legend.title = element_blank(),
+        panel.grid.minor.x =  element_blank())
+```
+
+
+## Vary degree
+
+Fixing the number of communities $K=16$, we vary the average degree of the network: $5, 10, ..., 60$.
+
+```{r}
+ret1 <- fread("output/vsp_2091690.csv")
+ret2 <- fread("output/vsp_2099876.csv")
+ret <- rbind(ret1, ret2)
+```
+
+### In paper
+```{r}
+criteria <- "^nmi"
+ret_long <- output_ret(ret, "^nmi", by=c("K.seq", "lambda"))
+
+ret_tmp <- merge(ret_long[grepl("HCD\\.|sp\\.varimax", method) & K.seq == 16, 
+                          .(mean(value)), by=.(K.seq, lambda, method)],
+                 method_lab[,.(method, label)], 
+                 by = "method")
+
+nmi_deg <- ret_tmp %>% 
+  ggplot(aes(x = lambda, y= V1, group = label, col = label, shape = label )) +
+  geom_line() + geom_point(size = 3) +
+  scale_x_continuous(breaks = unique(ret_long$lambda)) +
+  scale_shape_manual(values = c(4,1,2)) +
+  ggtitle("NMI (Number of community = 16)") +
+  ylab("") +
+  xlab("Average degree") +
+  theme_bw() +
+  theme(legend.position = "bottom", 
+        legend.title = element_blank(),
+        panel.grid.minor.x =  element_blank())
+
+nmi_deg
+```
+
+
+### NMI
+```{r}
+criteria <- "^nmi"
+ret_long <- output_ret(ret, criteria, by=c("K.seq", "lambda"))
+
+ret_tmp <- merge(ret_long[grep("HCD|sp\\.varimax", method), 
+                          .(mean(value)), by=.(K.seq,lambda, method)],
+                 method_lab[,.(method, label)], 
+                 by = c("method"))
+
+ret_tmp %>% 
+  ggplot(aes(x = lambda, y= V1, group = method, col = label, shape = label )) +
+  geom_line() + geom_point() +
+  scale_x_continuous(breaks = unique(ret_long$lambda)) +
+  ggtitle("NMI") +
+  ylab("") +
+  
+  theme_bw() +
+  theme(legend.position = "bottom", 
+        legend.title = element_blank(),
+        panel.grid.minor.x =  element_blank()) +
+  facet_wrap(~K.seq)
+```
+
+
+### ncl
+```{r}
+criteria <- "^ncl"
+ret_long <- output_ret(ret, criteria, by=c("K.seq", "lambda"))
+
+ret_tmp <- merge(ret_long[grep("HCD|sp\\.varimax", method), 
+                          .(mean(value)), by=.(K.seq,lambda, method)],
+                 method_lab[,.(method, label)], 
+                 by = c("method"))
+
+ret_tmp %>% 
+  ggplot(aes(x = lambda, y= V1, group = method, col = label, shape = label )) +
+  geom_line() + geom_point() +
+  scale_x_continuous(breaks = unique(ret_long$lambda)) +
+  ggtitle("Estimated number of communities") +
+  ylab("") +
+  
+  theme_bw() +
+  theme(legend.position = "bottom", 
+        legend.title = element_blank(),
+        panel.grid.minor.x =  element_blank()) +
+  facet_wrap(~K.seq)
+```
+
+
+### Similarity
+```{r}
+criteria <- "bin.err"
+ret_long <- output_ret(ret, criteria, by=c("K.seq", "lambda"))
+
+ret_tmp <- merge(ret_long[grep("HCD|sp\\.varimax", method), 
+                          .(mean(value)), by=.(K.seq,lambda, method)],
+                 method_lab[,.(method, label)], 
+                 by = c("method"))
+
+ret_tmp %>% 
+  ggplot(aes(x = lambda, y= V1, group = method, col = label, shape = label )) +
+  geom_line() + geom_point() +
+  scale_x_continuous(breaks = unique(ret_long$lambda)) +
+  ggtitle("Error in the tree similarity matrix") +
+  ylab("") +
+  
+  theme_bw() +
+  theme(legend.position = "bottom", 
+        legend.title = element_blank(),
+        panel.grid.minor.x =  element_blank()) +
+  facet_wrap(~K.seq)
+```
+
+### Matrix error
+```{r}
+criteria <- "P.err"
+ret_long <- output_ret(ret, criteria, by=c("K.seq", "lambda"))
+
+ret_tmp <- merge(ret_long[grep("HCD|sp\\.varimax", method), 
+                          .(mean(value)), by=.(K.seq,lambda, method)],
+                 method_lab[,.(method, label)], 
+                 by = c("method"))
+
+ret_tmp %>% 
+  ggplot(aes(x = lambda, y= V1, group = method, col = label, shape = label )) +
+  geom_line() + geom_point() +
+  scale_x_continuous(breaks = unique(ret_long$lambda)) +
+  ggtitle("Error in the probability matrix") +
+  ylab("") +
+  
+  theme_bw() +
+  theme(legend.position = "bottom", 
+        legend.title = element_blank(),
+        panel.grid.minor.x =  element_blank()) +
+  facet_wrap(~K.seq)
+```
+
+## In paper 
+
+```{r}
+ggpubr::ggarrange(nmi_k, nmi_deg,  nrow=1, common.legend = TRUE, legend="bottom")
+ggsave(paste0("tables_figures/sim_hcd_vs_hvsp.pdf"), width = 8, height = 4)
+```
+
+
+# Citation network example
+
+In the following, we apply `Hvsp` to the citation network by @ji2016coauthorship.
+We focus on the 3-core of the largest connected component of the network.
+We compare the clustering results by `Hvsp` with different stopping rules and with `vsp`.
+
+```{r}
+load("Citation3Core.Rda")
+
+# handle the duplicated author
+vdv1 <- which(rownames(A) == "Aad W van der Vaart")
+vdv2 <- which(rownames(A) == "Aad van der Vaart")
+A[vdv1, ] <- (A[vdv1, ] | A[vdv2, ])
+A[, vdv1] <- (A[, vdv1] | A[, vdv2])
+A <- A[-vdv2,]
+A <- A[,-vdv2]
+```
+
+## `Hvsp` with non-backtracking (NB) by @le2015estimating
+
+We apply `Hvsp` using the non-backtracking (@le2015estimating) as the stopping rule.
+We first plot the hierarchical tree. Research areas are manually labelled based on the research interests of the 10 statistician with highest scores, which are followed by the community size labelled in parentheses.
+
+```{r include=FALSE}
+ret_vsp <- HCD(A, method = "vsp",stopping = "NB", reg=FALSE, notree = F)
+HCD.varimax.hc <- hclust(as.dist(50-ret_vsp$result$comm.bin.sim.mat),
+                         method="single")
+vsp_ncl <- ret_vsp$result$ncl
+
+# order.dendrogram(as.dendrogram(HCD.varimax.hc))
+
+lab_n <- data.table(table(ret_vsp$result$labels))
+lab_fields <- data.table(labels = 1:10, 
+                         field = c("Bayesian methodology", "Bayesian theory", "Design of experiments", 
+                                   "Multivariate & dimension reduction", "High-dimensional theory", "Non-parametrics & wavelets", "Multiple testing & inference", 
+                                   "Functional data analysis", "Non- & semi-parametric methods", 
+                                   "High-dimensional methodology"),
+                         n = lab_n$N)
+lab_fields[, lab := paste0(field, " (",n, ")")]
+
+HCD.varimax.hc$labels <- lab_fields[order.dendrogram(as.dendrogram(HCD.varimax.hc)), lab]
+
+pdf("tables_figures/citation_tree.pdf", width = 9, height = 3)
+par(mar=c(2, 0, 0, 16))
+plot(rev(as.dendrogram(HCD.varimax.hc)), horiz=TRUE, yaxt='n')
+dev.off()
+```
+
+```{r}
+par(mar=c(2, 0, 0, 16))
+plot(rev(as.dendrogram(HCD.varimax.hc)), horiz=TRUE, yaxt='n')
+```
+
+
+```{r eval=F}
+authors <- fread("ECV-FullAuthorCommunity.csv")
+
+ret_labels <- data.table(author = rownames(A), labels = ret_vsp$labels)
+ret_labels <- merge(ret_labels, authors, 
+                    by = "author")
+setorder(ret_labels, labels, -degree)
+View(ret_labels[, head(.SD, 10), by=.(labels)])
+```
+
+We next show the 10 statisticians with the highest scores in each community/factor.
+
+```{r}
+# ret_tmp <- HCD(A, method = "vsp",stopping = "NB", reg=FALSE, notree = F)
+
+top_cent_n <- function(x, n = 10) paste(names(head(x[order(-x)], n)), collapse = ", ")
+top_n <- 10
+
+field_top <- data.table(labels = 1:top_n, author = sapply(ret_vsp$cent, top_cent_n, top_n))
+field_top <- merge(lab_fields[,.(labels, lab)], field_top, by = "labels")
+
+fwrite(field_top, "tables_figures/vsp_hcd_field_top.csv")
+
+
+field_top_ret <- field_top[, .(lab,author)]
+setnames(field_top_ret, c("lab", "author"), 
+         c("Community (size)", paste0("Top ", top_n, " contributors")))
+kable(field_top_ret, 
+      booktabs = TRUE, 
+      caption = paste0("The ", top_n, " statisticians with the highest scores in each community/factor."), 
+      label = "field-top",
+      align = "l", 
+      # format.args = list(big.mark = ","),
+      format = 'latex') %>% 
+  # add_header_above(c(" ", "Number of firms"=3, "Registration Captial"=3)) %>% 
+  kable_styling(latex_options = c("hold_position", "striped", "scale_down")) %>%
+  column_spec(column = 1, width = "2in") %>%
+  column_spec(column = 2, width = "4in") %>%
+  save_kable("tables_figures/vsp_hcd_field_top.tex")
+```
+
+```{r results='asis'}
+kable(field_top_ret, 
+      booktabs = TRUE, 
+      caption = paste0("The ", top_n, " statisticians with the highest scores in each community/factor."), 
+      label = "field-top",
+      align = "l") %>%
+  kable_styling(bootstrap_options = "striped")
+```
+
+
+## `Hvsp` with edge cross-validation (ECV) by @li2020network
+
+We apply `Hvsp` using the edge cross-validation (ECV) by (@li2020network) as the stopping rule.
+We first plot the hierarchical tree.
+Note that the results can vary with different seeds.
+
+```{r include=FALSE}
+set.seed(100)
+ret_vsp <- HCD(A, method = "vsp", stopping = "ECV", reg=FALSE, notree = F, n.min = 30)
+
+HCD.varimax.hc <- hclust(as.dist(50-ret_vsp$result$comm.bin.sim.mat),
+                         method="single")
+
+lab_n <- data.table(table(ret_vsp$result$labels))
+lab_fields <- data.table(labels = 1:ret_vsp$result$ncl, 
+                         field = c("Bayesian methodology", "Bayesian theory", "Design of experiments", 
+                                   "Multivariate & dimension reduction", "High-dimensional theory",
+                                   "Sampling & hypothesis testing",
+                                   "Multiple testing & inference", 
+                                   "Functional data analysis", "Functional data & time series", 
+                                   "Non- & semi-parametric methods", 
+                                   "High-dimensional methodology"),
+                         n = lab_n$N)
+lab_fields[, lab := paste0(field, " (",n, ")")]
+
+labels(HCD.varimax.hc) <- lab_fields[order.dendrogram(as.dendrogram(HCD.varimax.hc)), lab]
+
+pdf("tables_figures/citation_tree_ecv.pdf", width = 9, height = 3)
+par(mar=c(2, 0, 0, 16))
+plot(rev(as.dendrogram(HCD.varimax.hc)), horiz=TRUE, yaxt='n')
+# plot((as.dendrogram(HCD.varimax.hc)), horiz=TRUE, yaxt='n')
+dev.off()
+```
+
+```{r}
+par(mar=c(2, 0, 0, 16))
+plot(rev(as.dendrogram(HCD.varimax.hc)), horiz=TRUE, yaxt='n')
+```
+
+```{r eval = F}
+authors <- fread("ECV-FullAuthorCommunity.csv")
+
+ret_labels <- data.table(author = rownames(A), labels = ret_vsp$result$labels)
+ret_labels <- merge(ret_labels, authors, 
+                    by = "author")
+setorder(ret_labels, labels, -degree)
+View(ret_labels[, head(.SD, 10), by=.(labels)])
+```
+
+We next show the 10 statisticians with the highest scores in each community/factor.
+
+```{r}
+top_cent_n <- function(x, n = 10) paste(names(head(x[order(-x)], n)), collapse = ", ")
+top_n <- 10
+
+field_top <- data.table(labels = 1:ret_vsp$result$ncl, author = sapply(ret_vsp$cent, top_cent_n, top_n))
+field_top <- merge(lab_fields[,.(labels, lab)], field_top, by = "labels")
+
+fwrite(field_top, "tables_figures/vsp_hcd_field_top_ecv.csv")
+
+
+field_top_ret <- field_top[, .(lab,author)]
+setnames(field_top_ret, c("lab", "author"), 
+         c("Community (size)", paste0("Top ", top_n, " contributors")))
+kable(field_top_ret, 
+      booktabs = TRUE, 
+      caption = paste0("The ", top_n, " statisticians with the highest scores in each community/factor."), 
+      label = "field-top",
+      align = "l", 
+      # format.args = list(big.mark = ","),
+      format = 'latex') %>% 
+  # add_header_above(c(" ", "Number of firms"=3, "Registration Captial"=3)) %>% 
+  kable_styling(latex_options = c("hold_position", "striped", "scale_down")) %>%
+  column_spec(column = 1, width = "2in") %>%
+  column_spec(column = 2, width = "4in") %>%
+  save_kable("tables_figures/vsp_hcd_field_top_ecv.tex")
+```
+
+```{r results='asis'}
+kable(field_top_ret, 
+      booktabs = TRUE, 
+      caption = paste0("The ", top_n, " statisticians with the highest scores in each community/factor."), 
+      label = "field-top",
+      align = "l") %>%
+  kable_styling(bootstrap_options = "striped")
+```
+
+## VSP only
+
+We next apply `vsp` using the number of clusters from `Hvsp` with NB as the dimension.
+```{r}
+ret_vsp_k <- vsp(A, rank = vsp_ncl, center = F)
+sel_col <- 1:vsp_ncl
+ret_vsp_k %>% get_svd_v(sel_col) %>% dplyr::select(-id) %>% 
+  dplyr::mutate(leverage = purrr::pmap_dbl(., sum)) %>% 
+  dplyr::sample_n(min(nrow(.), 1000), weight = leverage^2) %>% 
+  dplyr::select(-leverage) %>% GGally::ggpairs(ggplot2::aes(alpha = 0.001)) +
+  ggplot2::theme_minimal()
+
+ss <- sqrt(nrow(ret_vsp_k$Y))
+ret_vsp_k %>% get_varimax_y(sel_col) %>% dplyr::select(-id) %>% 
+  mutate_all(function(x) x/ss) %>%
+  dplyr::mutate(leverage = purrr::pmap_dbl(., sum)) %>% 
+  dplyr::sample_n(min(nrow(.), 1000), weight = leverage^2) %>% 
+  dplyr::select(-leverage) %>% GGally::ggpairs(ggplot2::aes(alpha = 0.001)) +
+  ggplot2::theme_minimal()
+# vsp::plot_varimax_y_pairs(ret_vsp_k, 1:vsp_ncl)
+```
+
+```{r}
+top_n <- 10
+Communitying <- apply(ret_vsp_k$Y, 1, function(x) which.max(abs(x)))
+ret_labels <- data.table(author = names(Communitying), 
+                         labels = Communitying)
+
+top_idx <- apply(ret_vsp_k$Y, 2, function(y) order(abs(y)))
+top_loading_n <- function(x, n = 10) paste(tail(rownames(ret_vsp_k$Y)[x], n), 
+                                           collapse = ", ")
+
+field_top <- data.table(labels = 1:top_n, author = apply(top_idx, 2, top_loading_n, top_n))
+setnames(field_top, c("labels", "author"), 
+         c("Community", paste0("Top ", top_n, " contributors")))
+```
+
+```{r results='asis'}
+kable(field_top, 
+      booktabs = TRUE, 
+      caption = paste0("The ", top_n, " statisticians with the highest scores in each community/factor."), 
+      label = "field-top",
+      align = "l") %>%
+  kable_styling(bootstrap_options = "striped")
+```
